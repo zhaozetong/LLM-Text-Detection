@@ -84,6 +84,7 @@ def load_precomputed_features(feature_path):
     """加载预计算的特征"""
     feature_data = torch.load(feature_path, map_location='cpu')
     features = feature_data['features']
+    features = features.to(torch.float32)
     labels = feature_data.get('labels', None)  # 安全获取labels
     hidden_dim = feature_data['hidden_dim']
     return features, labels, hidden_dim

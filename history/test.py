@@ -1,5 +1,5 @@
 from history.llm_predict import *
-from mlp_classifier import MLP_classifier as mlp_c
+from classifier import MLP_classifier as mlp_c
 import torch
 
 MODEL = 'llama-3-3b'
