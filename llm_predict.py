@@ -671,7 +671,7 @@ if __name__ == "__main__":
         print(f"加载模型: {MODEL_PATH}")
         model, tokenizer = load_model_tok(device=device)
         tokenizer.pad_token = tokenizer.eos_token
-        train_data,val_data = split_train_val_data(load_jsonl(args.train_file), val_ratio=0.0)
+        train_data,val_data = split_train_val_data(load_jsonl(args.train_file), val_ratio=0.5)
         print(f"训练数据量: {len(train_data)}, 验证数据量: {len(val_data)}")
         
         # 创建LLM特征分类器
@@ -711,15 +711,16 @@ if __name__ == "__main__":
                 
                 with torch.no_grad():
                     logits, _ = llm_classifier(inputs)
-                    print("分类器训练模式:", llm_classifier.classifier.training)
-                    print('feature',_[:5,0:3]) # 测试一下
-                    print('logits',logits[:10])
-                    print('bias',llm_classifier.classifier.fc1.bias[:5])
 
-                    print("logits",llm_classifier.classifier(_)[:10])
-                    logits = llm_classifier.classifier(_) # 手动计算
+                    # print("分类器训练模式:", llm_classifier.classifier.training)
+                    # print('feature',_[:5,0:3]) # 测试一下
+                    # print('logits',logits[:10])
+                    # print('bias',llm_classifier.classifier.fc1.bias[:5])
+                    # exit()
+
+
                     batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
-                exit()
+                
                 predictions.extend(batch_predictions)
             
             # 停止记录并保存测试特征

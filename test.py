@@ -55,10 +55,13 @@ else:
             
             logits = mlp(batch_features)
 
-            print(batch_features[:,:3])
-            print(logits[:])
-            print(mlp.fc1.bias[:3])
-            exit()
+            # print('feature',batch_features[:,:3])
+            # print('logits',logits[:])
+            # print('bias',mlp.fc1.bias[:5])
+            # exit()
+
+
+            
             # 获取预测标签
             batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
             predictions.extend(batch_predictions)

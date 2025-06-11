@@ -251,7 +251,7 @@ def main():
         loaded_models = []
         for i in range(args.num_models):
             model_path = os.path.join(args.checkpoint_dir, f"mlp_{args.model}_bootstrap_{i+1}.pt")
-            model_path = os.path.join(args.checkpoint_dir, f"features/{args.model}_test_features.pt")
+            model_path = f'/root/autodl-tmp/checkpoint/llm_classifier_{args.model}_best_params.pt'
             if not os.path.exists(model_path):
                 print(f"警告: 模型文件不存在: {model_path}")
                 continue
