@@ -15,6 +15,7 @@ class MLP_classifier(torch.nn.Module):
         self.fc3 = torch.nn.Linear(input_dim//100, output_dim)
         self.relu = torch.nn.ReLU()
         self.dropout = torch.nn.Dropout(dropout_rate)
+        self.softmax = torch.nn.Softmax(dim=1)
 
     def forward(self, x):
         x = x.to(torch.float32)  # 类型转换
@@ -31,7 +32,7 @@ class MLP_classifier(torch.nn.Module):
         x = self.fc3(x)
         return x
 
-    # def predict_proba(self, x):
-    #     """返回概率分布用于软投票"""
-    #     logits = self.forward(x)
-    #     return self.softmax(logits)
+    def predict_proba(self, x):
+        """返回概率分布用于软投票"""
+        logits = self.forward(x)
+        return self.softmax(logits)

@@ -32,11 +32,12 @@ def load_jsonl(file_path):
 
 class FeatureExtractor:
     """LLM特征提取器"""
-    def __init__(self, model, tokenizer, device):
+    def __init__(self, model, tokenizer, device, num_layers=3):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
-        self.hidden_states = None
+        self.num_layers = num_layers  # 使用最后几层
+        self.hidden_states_list = []  # 存储多层隐藏状态
         self._register_hooks()
         
         # 获取隐藏层维度
@@ -51,41 +52,62 @@ class FeatureExtractor:
             print(f"无法直接获取隐藏层维度，使用默认值: {self.hidden_dim}")
     
     def _register_hooks(self):
-        """注册前向钩子函数以捕获最后一层隐藏状态 - 与llm_predict.py完全一致"""
-        def hook_fn(module, input, output):
-            if isinstance(output, tuple):
-                self.hidden_states = output[0]
-            else:
-                self.hidden_states = output
+        """注册前向钩子函数以捕获最后几层隐藏状态"""
+        def create_hook_fn(layer_idx):
+            def hook_fn(module, input, output):
+                if isinstance(output, tuple):
+                    hidden_state = output[0]
+                else:
+                    hidden_state = output
+                # 确保列表长度足够
+                while len(self.hidden_states_list) <= layer_idx:
+                    self.hidden_states_list.append(None)
+                self.hidden_states_list[layer_idx] = hidden_state
+            return hook_fn
         
-        # 针对不同模型结构注册钩子 - 与llm_predict.py完全一致
+        # 针对不同模型结构注册钩子
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
-            last_layer = self.model.model.layers[-1]
-            last_layer.register_forward_hook(hook_fn)
+            layers = self.model.model.layers
+            for i in range(self.num_layers):
+                layer_idx = len(layers) - 1 - i  # 从最后一层开始
+                layers[layer_idx].register_forward_hook(create_hook_fn(i))
         elif hasattr(self.model, 'model') and hasattr(self.model.model, 'blocks'):
-            last_layer = self.model.model.blocks[-1]
-            last_layer.register_forward_hook(hook_fn)
+            blocks = self.model.model.blocks
+            for i in range(self.num_layers):
+                layer_idx = len(blocks) - 1 - i
+                blocks[layer_idx].register_forward_hook(create_hook_fn(i))
         elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
-            last_layer = self.model.transformer.h[-1]
-            last_layer.register_forward_hook(hook_fn)
+            layers = self.model.transformer.h
+            for i in range(self.num_layers):
+                layer_idx = len(layers) - 1 - i
+                layers[layer_idx].register_forward_hook(create_hook_fn(i))
         else:
             raise ValueError("不支持的模型结构，无法注册钩子")
     
-    def _get_pooled_output(self, hidden_states, attention_mask=None):
-        """获取池化后的特征表示 - 与llm_predict.py完全一致"""
+    def _get_pooled_output(self, attention_mask=None):
+        """获取池化后的特征表示，对多层隐藏状态求平均"""
+        # 收集所有有效的隐藏状态
+        valid_hidden_states = [hs for hs in self.hidden_states_list if hs is not None]
+        
+        if not valid_hidden_states:
+            raise ValueError("没有捕获到有效的隐藏状态")
+        
+        # 对多层隐藏状态求平均
+        averaged_hidden_states = torch.stack(valid_hidden_states, dim=0).mean(dim=0)
+        
         if attention_mask is not None:
             # 找到每个序列最后一个非填充token的位置
             last_token_indices = attention_mask.sum(dim=1) - 1
-            batch_size = hidden_states.shape[0]
-            pooled_output = hidden_states[torch.arange(batch_size), last_token_indices]
+            batch_size = averaged_hidden_states.shape[0]
+            pooled_output = averaged_hidden_states[torch.arange(batch_size), last_token_indices]
         else:
             # 否则直接使用序列最后一个位置
-            pooled_output = hidden_states[:, -1]
+            pooled_output = averaged_hidden_states[:, -1]
         
         return pooled_output
     
     def extract_features(self, texts, batch_size=8, max_length=512):
-        """批量提取特征 - 确保与llm_predict.py处理流程一致"""
+        """批量提取特征"""
         self.model.eval()
         features = []
         
@@ -107,13 +129,12 @@ class FeatureExtractor:
             inputs = {k: v.to(self.device) for k, v in inputs.items()}
             
             with torch.no_grad():
+                # 清空之前的隐藏状态
+                self.hidden_states_list = [None] * self.num_layers
                 _ = self.model(**inputs)
             
-            # 使用与llm_predict.py完全相同的特征提取方法
-            batch_features = self._get_pooled_output(
-                self.hidden_states, 
-                inputs.get('attention_mask')
-            )
+            # 使用修改后的特征提取方法
+            batch_features = self._get_pooled_output(inputs.get('attention_mask'))
             features.append(batch_features.cpu())
             
             del inputs, batch_features
@@ -129,6 +150,7 @@ def main():
     parser.add_argument("--test_file", type=str, default="test.jsonl", help="测试数据文件")
     parser.add_argument("--batch_size", type=int, default=16, help="批处理大小")
     parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/checkpoint/features", help="特征保存目录")
+    parser.add_argument("--num_layers", type=int, default=3, help="使用最后几层隐藏状态求平均 (默认3层)")
     
     args = parser.parse_args()
     
@@ -147,7 +169,7 @@ def main():
     print(f"加载模型: {model_path}")
     model, tokenizer = load_model_tok(model_path, device)
     
-    extractor = FeatureExtractor(model, tokenizer, device)
+    extractor = FeatureExtractor(model, tokenizer, device, num_layers=args.num_layers)
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -184,7 +206,7 @@ def main():
     }, test_save_path)
     print(f"测试特征已保存到: {test_save_path}")
     
-    print(f"特征提取完成! 训练特征形状: {train_features.shape}, 测试特征形状: {test_features.shape}")
+    print(f"特征提取完成! 使用最后{args.num_layers}层平均. 训练特征形状: {train_features.shape}, 测试特征形状: {test_features.shape}")
 
 if __name__ == "__main__":
     main()

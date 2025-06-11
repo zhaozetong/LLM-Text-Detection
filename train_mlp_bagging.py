@@ -19,9 +19,6 @@ def train_mlp(model, train_features, train_labels, val_features=None, val_labels
     train_dataset = TensorDataset(train_features, train_labels)
     train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
     
-    print(f"训练数据集大小: {len(train_dataset)},label=1比例: {train_labels.sum().item() / len(train_labels):.4f}")
-    print(f"验证数据集大小: {len(val_features)}, label=1比例: {val_labels.sum().item() / len(val_labels):.4f}" )
-
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-4)
     criterion = nn.CrossEntropyLoss()
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
@@ -149,8 +146,8 @@ def main():
     parser.add_argument("--checkpoint_dir", type=str, default="/root/autodl-tmp/checkpoint", help="模型保存目录")
     parser.add_argument("--batch_size", type=int, default=8, help="批处理大小")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="学习率")
-    parser.add_argument("--num_epochs", type=int, default=1, help="训练轮数")
-    parser.add_argument("--num_models", type=int, default=1, help="集成模型数量")
+    parser.add_argument("--num_epochs", type=int, default=3, help="训练轮数")
+    parser.add_argument("--num_models", type=int, default=5, help="集成模型数量")
     parser.add_argument("--val_ratio", type=float, default=0.2, help="验证集比例")
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--soft_voting", action="store_true", help="使用软投票")

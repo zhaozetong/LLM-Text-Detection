@@ -1,4 +1,4 @@
-from llm_predict import *
+from history.llm_predict import *
 from mlp_classifier import MLP_classifier as mlp_c
 import torch
 
@@ -16,7 +16,7 @@ saved_state = torch.load(model_path, map_location=device)
 mlp = mlp_c(3072, 2)  # 使用你导入的mlp_c
 mlp.to(device)
 mlp.load_state_dict(saved_state)  # 加载保存的参数
-mlp.eval()  # 设置为评估模式
+# mlp.eval()  # 设置为评估模式
 
 print("\n✅ 参数加载成功！")
 
