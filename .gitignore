@@ -1,0 +1,7 @@
+*.*
+!*.py
+!*.json
+predictions.json
+!*.md
+!*.sh
+!.gitignore
