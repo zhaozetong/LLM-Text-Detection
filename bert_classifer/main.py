@@ -1,5 +1,5 @@
 import argparse
-from train import train_model
+from bert_classifer.train import train_model
 from predict import predict
 
 def main():

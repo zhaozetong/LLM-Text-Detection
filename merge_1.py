@@ -48,20 +48,23 @@ for i in range(predictions.shape[1]):
     ones_count = vote_counts.get(1, 0)
     total_votes = zeros_count + ones_count
     
-    if (zeros_count == 15 and ones_count == 16) or (zeros_count == 16 and ones_count == 15):
+    # if (zeros_count == 15 and ones_count == 16) or (zeros_count == 16 and ones_count == 15):
+    #     close_vote_indices.append(i)
+    #     print(f"索引 {i} 的投票比例为 {zeros_count}:{ones_count}")
+    p = zeros_count / (ones_count + 0.1)  # 防止除以0
+    if 0.4<p<0.6: # 找出不太确定的标签
         close_vote_indices.append(i)
-        print(f"索引 {i} 的投票比例为 {zeros_count}:{ones_count}")
-
+        
 # 将bagging结果保存到文件
-with open('merge.txt', 'w') as f:
+with open('35merge.txt', 'w') as f:
     for result in bagging_results:
         f.write(f"{result}\n")
 
 # 将15:16或16:15比例的索引保存到15index.txt
-with open('15index.txt', 'w') as f:
+with open('uncertain_index.txt', 'w') as f:
     for idx in close_vote_indices:
         f.write(f"{idx}\n")
 
 print(f"Bagging完成，结果已保存到 merge.txt")
 print(f"共 {len(bagging_results)} 条预测，其中标签0: {bagging_results.count(0)}个，标签1: {bagging_results.count(1)}个")
-print(f"发现 {len(close_vote_indices)} 个投票比例为15:16或16:15的样本，索引已保存到 15index.txt")
+print(f"发现 {len(close_vote_indices)} 个投票比例不中的样本，索引已保存到 uncertain_index.txt")

@@ -6,7 +6,7 @@ import os
 from tqdm import tqdm
 from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score
 from sklearn.model_selection import train_test_split
-from model import set_seed, TextClassificationDataset, load_jsonl, create_model, save_model_params
+from bert_classifer.model import set_seed, TextClassificationDataset, load_jsonl, create_model, save_model_params
 
 def train_model(train_file='train.jsonl', test_file='test.jsonl', output_dir='model_output', 
                pretrained_path='bert-base-uncased', batch_size=16, epochs=3, learning_rate=2e-5):

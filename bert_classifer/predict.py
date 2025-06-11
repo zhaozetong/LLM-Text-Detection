@@ -3,7 +3,7 @@ import torch
 from torch.utils.data import DataLoader
 from transformers import BertTokenizer
 from tqdm import tqdm
-from model import TextClassificationDataset, load_jsonl, create_model, load_model_params
+from bert_classifer.model import TextClassificationDataset, load_jsonl, create_model, load_model_params
 
 def predict(input_file, output_file, model_params_path, pretrained_path='bert-base-uncased', batch_size=16):
     # 确定设备（GPU或CPU）

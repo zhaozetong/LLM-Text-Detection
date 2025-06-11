@@ -96,15 +96,18 @@ class LLMFeatureClassifier(torch.nn.Module):
         elif hasattr(self.llm.config, 'dim'):
             self.hidden_dim = self.llm.config.dim
         else:
-            # 默认Llama模型
-            self.hidden_dim = 4096
-            print(f"无法直接获取隐藏层维度，使用默认值: {self.hidden_dim}")
+            raise ValueError(f"无法直接获取隐藏层维度，使用默认值: {self.hidden_dim}")
         
         # MLP分类器
         self.classifier = MLP_classifier(self.hidden_dim, output_dim).to(device)
         
         # 存储隐藏状态的变量
         self.hidden_states = None
+        
+        # 特征记录相关
+        self.recorded_features = []
+        self.recorded_labels = []
+        self.recording_mode = False
         
         # 注册钩子获取最后一层隐藏状态
         self._register_hooks()
@@ -149,10 +152,47 @@ class LLMFeatureClassifier(torch.nn.Module):
         
         return pooled_output
     
-    def forward(self, inputs):
+    def start_recording(self):
+        """开始记录特征"""
+        self.recording_mode = True
+        self.recorded_features = []
+        self.recorded_labels = []
+    
+    def stop_recording(self):
+        """停止记录特征"""
+        self.recording_mode = False
+    
+    def get_recorded_features(self):
+        """获取记录的特征和标签"""
+        if self.recorded_features:
+            features = torch.cat(self.recorded_features, dim=0)
+            labels = torch.cat(self.recorded_labels, dim=0) if self.recorded_labels else None
+            return features, labels
+        return None, None
+    
+    def save_recorded_features(self, save_path, model_name):
+        """保存记录的特征"""
+        features, labels = self.get_recorded_features()
+        if features is not None:
+            save_data = {
+                'features': features,
+                'hidden_dim': self.hidden_dim
+            }
+            if labels is not None:
+                save_data['labels'] = labels
+            
+            os.makedirs(os.path.dirname(save_path), exist_ok=True)
+            torch.save(save_data, save_path)
+            print(f"特征已保存到: {save_path}")
+            print(f"特征形状: {features.shape}")
+            return True
+        return False
+
+    def forward(self, inputs, labels=None):
         """
         前向传递
         inputs: 已经用tokenizer处理过的输入
+        labels: 标签（可选，用于记录）
         """
         # 确保模型处于评估模式，不更新参数统计
         self.llm.eval()
@@ -167,29 +207,48 @@ class LLMFeatureClassifier(torch.nn.Module):
         # 确保特征张量在正确的设备上
         features = features.to(self.device)
         
+        # 记录特征（如果处于记录模式）
+        if self.recording_mode:
+            self.recorded_features.append(features.detach().cpu())
+            if labels is not None:
+                self.recorded_labels.append(labels.detach().cpu())
+        
         # 将提取的特征输入MLP分类器
         logits = self.classifier(features)
         
-        return logits
-    
-    def predict(self, text):
-        """预测单个文本的分类"""
-        # 准备输入
-        inputs = self.tokenizer(text, return_tensors="pt", padding=True).to(self.device)
-        
-        # 获取预测结果
-        with torch.no_grad():
-            logits = self.forward(inputs)
-            predictions = torch.argmax(logits, dim=-1)
-        
-        return predictions.item()
-    
-    def get_last_hidden_state(self):
-        """返回最后捕获的隐藏状态"""
-        return self.hidden_states
+        return logits, features
 
 
-def train_classifier(model, train_data, val_data, device, batch_size=8, learning_rate=1e-4, num_epochs=1):
+def load_model_tok(device):
+    safetensors_exist = any(f.endswith(".safetensors") for f in os.listdir(MODEL_PATH))
+    model = AutoModelForCausalLM.from_pretrained(MODEL_PATH, trust_remote_code=True,
+                                                use_safetensors=safetensors_exist,
+                                                torch_dtype=torch.float16).to(device)# 加载bin 文件
+    tok = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True,
+                                        )
+
+    return model, tok
+
+
+def load_jsonl(file_path):
+    """加载JSONL文件"""
+    data = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            data.append(json.loads(line))
+    return data 
+
+
+def set_seed(seed):
+    """设置随机种子以确保可重复性"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def train_classifier(model, train_data, val_data, device, batch_size=8, learning_rate=1e-4, num_epochs=1, model_name=""):
     """训练LLMFeatureClassifier模型"""
     # 设置优化器和损失函数
     optimizer = torch.optim.AdamW(model.classifier.parameters(), lr=learning_rate)
@@ -201,6 +260,9 @@ def train_classifier(model, train_data, val_data, device, batch_size=8, learning
     
     best_val_acc = 0.0
     best_model_state = None
+    
+    # 开始记录训练特征
+    model.start_recording()
     
     # 训练循环
     for epoch in range(num_epochs):
@@ -230,8 +292,8 @@ def train_classifier(model, train_data, val_data, device, batch_size=8, learning
             inputs = {k: v.to(device) for k, v in inputs.items()}
             labels = torch.tensor(batch_labels, dtype=torch.long).to(device)
             
-            # 前向传播
-            logits = model(inputs)
+            # 前向传播（传入labels用于记录）
+            logits, _ = model(inputs, labels)
             
             # 计算损失
             loss = criterion(logits, labels)
@@ -267,10 +329,9 @@ def train_classifier(model, train_data, val_data, device, batch_size=8, learning
         epoch_acc = correct / total
         
         print(f"Epoch {epoch+1}/{num_epochs}, 损失: {epoch_loss:.4f}, 训练准确率: {epoch_acc:.4f}")
-        
         # 验证
-        # val_acc = evaluate_classifier(model, val_data, device, batch_size) # 这里先不验证,为了提速
-        val_acc = 0.9
+        val_acc = evaluate_classifier(model, val_data, device, batch_size) # 这里先不验证,为了提速
+        # val_acc = 0.9
         print(f"验证准确率: {val_acc:.4f}")
         
         # 更新学习率
@@ -280,6 +341,14 @@ def train_classifier(model, train_data, val_data, device, batch_size=8, learning
         if val_acc > best_val_acc:
             best_val_acc = val_acc
             best_model_state = model.classifier.state_dict().copy()
+
+    # 停止记录并保存训练特征
+    model.stop_recording()
+    feature_dir = '/root/autodl-tmp/checkpoint/features'
+    train_feature_path = os.path.join(feature_dir, f"{model_name}_train_features.pt")
+    if len(val_data)==0:
+        # 如果没有验证集，直接保存训练特征
+        model.save_recorded_features(train_feature_path, model_name)
 
     # 恢复最佳模型
     if best_model_state is not None:
@@ -318,6 +387,9 @@ def split_train_val_data(data, val_ratio=0.2):
 
 def evaluate_classifier(model, data, device, batch_size=8):
     """评估LLMFeatureClassifier模型"""
+    if not data:
+        print("没有数据可供评估")
+        return 0.8
     model.classifier.eval()
     dataloader = DataLoader(data, batch_size=batch_size, collate_fn=lambda x: x)
     
@@ -345,7 +417,7 @@ def evaluate_classifier(model, data, device, batch_size=8):
         
         # 预测
         with torch.no_grad():
-            logits = model(inputs)
+            logits, _ = model(inputs)
             predictions = torch.argmax(logits, dim=-1)
         
         # 统计正确预测数量
@@ -372,7 +444,7 @@ def evaluate_classifier(model, data, device, batch_size=8):
     return accuracy
 
 if __name__ == "__main__":
-    
+
     model_list = ['llama-2-7b','llama-2-13b','llama-3-8b','qwen-7b','llama-3-3b', 'mistral-7b']
     MODEL_PATHS = {
         'llama-2-7b': "/root/.cache/huggingface/hub/Llama-2-7b-chat-hf",
@@ -382,7 +454,7 @@ if __name__ == "__main__":
         'llama-3-3b': '/root/autodl-tmp/Llama-3.2-3B-Instruct/',
         'mistral-7b': '/root/autodl-tmp/Mistral-7B-Instruct-v0.3/',
     }
-    MODEL = f'qwen-7b'
+    MODEL = f'llama-3-3b'
 
     
     import argparse
@@ -394,81 +466,268 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=16, help="批处理大小")
     parser.add_argument("--train",action="store_true", help="训练模型")
     parser.add_argument("--seed",type=int,default=42, help="随机数种子")
+    parser.add_argument("--use_pre_features", action="store_true", help="使用预计算的特征进行训练和预测")
+    parser.add_argument("--pre_features", action="store_true", help="预计算并保存特征")
     
     args = parser.parse_args()
     set_seed(args.seed)
     MODEL=args.model
     MODEL_PATH = MODEL_PATHS[MODEL]
+    # args.use_precomputed_features = False # 默认使用预训练特征
     # 设置设备
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"使用设备: {device}")
-    # 加载模型和分词器
-    print(f"加载模型: {MODEL_PATH}")
-    model, tokenizer = load_model_tok(device=device)
-    tokenizer.pad_token = tokenizer.eos_token
-    train_data,val_data = split_train_val_data(load_jsonl(args.train_file), val_ratio=0.8)#使用更少的数据训练
-    print(f"训练数据量: {len(train_data)}, 验证数据量: {len(val_data)}")
-    # 创建LLM特征分类器分训练集和验证集
-    llm_classifier = LLMFeatureClassifier(model, tokenizer, device, output_dim=2)
-    # 确保模型的所有部分都在正确设备上
-    llm_classifier.classifier.to(device)
-
+    
+    # 特征文件路径
+    feature_dir = '/root/autodl-tmp/checkpoint/features'
+    train_feature_path = os.path.join(feature_dir, f"{args.model}_train_features.pt")
+    test_feature_path = os.path.join(feature_dir, f"{args.model}_test_features.pt")
     model_path = f'/root/autodl-tmp/checkpoint/llm_classifier_{args.model}_best_params.pt'
 
-    if args.train:
-        # 训练模型
-        print("开始训练模型...")
-        llm_classifier = train_classifier(llm_classifier, train_data, val_data, device, batch_size=args.batch_size, num_epochs=1)
-        # 保存模型参数
-        os.makedirs('model_output', exist_ok=True)
+    # 模式1: 预计算特征模式
+    if args.pre_features:
+        print("预计算特征模式：提取并保存训练和测试特征...")
         
-        torch.save(llm_classifier.classifier.state_dict(), model_path)
-        print(f"模型参数已保存到 model_output/llm_classifier_{args.model}_best_params.pt")
-
-    else:
-        print(f"加载模型参数: {model_path}")
-        llm_classifier.classifier.load_state_dict(torch.load(model_path, map_location=device))
+        # 加载模型和分词器
+        print(f"加载模型: {MODEL_PATH}")
+        model, tokenizer = load_model_tok(device=device)
+        tokenizer.pad_token = tokenizer.eos_token
         
-        # 
-        # 加载测试数据
+        # 加载数据
+        train_data = load_jsonl(args.train_file)
         test_data = load_jsonl(args.test_file)
-        print(f"加载测试数据: {len(test_data)} 条")
+        print(f"训练数据量: {len(train_data)}, 测试数据量: {len(test_data)}")
         
-        # 进行预测
-        print("开始预测...")
-        predictions = []
+        # 创建LLM特征分类器
+        llm_classifier = LLMFeatureClassifier(model, tokenizer, device, output_dim=2)
+        llm_classifier.classifier.to(device)
         
-        # 批量处理测试数据以加快预测速度
-        test_dataloader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=lambda x: x)
+        # 提取训练特征
+        print("提取训练特征...")
+        llm_classifier.start_recording()
         
-        for batch in tqdm(test_dataloader, desc="预测中",disable=not sys.stdout.isatty()):
+        train_dataloader = DataLoader(train_data, batch_size=args.batch_size, collate_fn=lambda x: x)
+        for batch in tqdm(train_dataloader, desc="提取训练特征"):
             batch_texts = []
-            batch_ids = []
+            batch_labels = []
             
             for item in batch:
                 batch_texts.append(item["text"])
-                batch_ids.append(item.get("id", ""))
+                batch_labels.append(item["label"])
             
-            # 构建输入提示
             prompts = [f"Determine if the following text was written by a human (0) or generated by an AI language model (1).\n\nText: \"{text}\"" 
-                        for text in batch_texts]
+                      for text in batch_texts]
             
-            # 编码输入
+            inputs = llm_classifier.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+            inputs = {k: v.to(device) for k, v in inputs.items()}
+            labels = torch.tensor(batch_labels, dtype=torch.long).to(device)
+            
+            with torch.no_grad():
+                _, _ = llm_classifier(inputs, labels)
+            
+            del inputs, labels
+            torch.cuda.empty_cache()
+        
+        llm_classifier.stop_recording()
+        llm_classifier.save_recorded_features(train_feature_path, args.model)
+        
+        # 提取测试特征
+        print("提取测试特征...")
+        llm_classifier.start_recording()
+        
+        test_dataloader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=lambda x: x)
+        for batch in tqdm(test_dataloader, desc="提取测试特征"):
+            batch_texts = []
+            
+            for item in batch:
+                batch_texts.append(item["text"])
+            
+            prompts = [f"Determine if the following text was written by a human (0) or generated by an AI language model (1).\n\nText: \"{text}\"" 
+                      for text in batch_texts]
+            
             inputs = llm_classifier.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
             inputs = {k: v.to(device) for k, v in inputs.items()}
             
-            # 预测
             with torch.no_grad():
-                logits = llm_classifier(inputs)
-                batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
+                _, _ = llm_classifier(inputs)
             
-            # 收集预测结果
-            predictions.extend(batch_predictions)
+            del inputs
+            torch.cuda.empty_cache()
         
-        # 将预测结果保存到llm.txt
-        with open(f'llm_{MODEL}.txt', 'w') as f:
-            for pred in predictions:
-                f.write(f"{pred}\n")
+        llm_classifier.stop_recording()
+        llm_classifier.save_recorded_features(test_feature_path, args.model)
         
-        print(f"预测结果已保存到 llm_{MODEL}.txt，共 {len(predictions)} 条预测")
+        print("特征预计算完成！")
+        
+    # 模式2: 使用预计算特征进行训练和预测
+    elif args.use_pre_features:
+        print("使用预计算特征模式...")
+        
+        if args.train:
+            print("使用预计算特征进行训练...")
+            
+            # 检查特征文件是否存在
+            if not os.path.exists(train_feature_path):
+                raise FileNotFoundError(f"训练特征文件不存在: {train_feature_path}")
+            
+            # 加载预计算的训练特征
+            print(f"加载预计算的训练特征: {train_feature_path}")
+            train_feature_data = torch.load(train_feature_path)
+            train_features = train_feature_data['features']
+            train_labels = train_feature_data['labels']
+            hidden_dim = train_feature_data['hidden_dim']
+            
+            # 创建简单的MLP分类器
+            from llm_predict import MLP_classifier
+            classifier = MLP_classifier(hidden_dim, 2).to(device)
+            
+            # 使用预提取特征训练
+            from torch.utils.data import TensorDataset
+            train_dataset = TensorDataset(train_features, train_labels)
+            train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+            
+            optimizer = torch.optim.AdamW(classifier.parameters(), lr=1e-4)
+            criterion = torch.nn.CrossEntropyLoss()
+            
+            print("使用预计算特征开始训练...")
+            classifier.train()
+            for epoch in range(1):
+                total_loss = 0.0
+                correct = 0
+                total = 0
+                
+                pbar = tqdm(train_dataloader, desc=f"训练 Epoch {epoch+1}")
+                for features, labels in pbar:
+                    features, labels = features.to(device), labels.to(device)
+                    
+                    optimizer.zero_grad()
+                    logits = classifier(features)
+                    loss = criterion(logits, labels)
+                    loss.backward()
+                    optimizer.step()
+                    
+                    total_loss += loss.item()
+                    predictions = torch.argmax(logits, dim=-1)
+                    correct += (predictions == labels).sum().item()
+                    total += len(labels)
+                    
+                    # 更新进度条
+                    batch_acc = (predictions == labels).float().mean().item()
+                    pbar.set_postfix({
+                        'loss': f"{loss.item():.4f}",
+                        'batch_acc': f"{batch_acc:.4f}"
+                    })
+                
+                epoch_acc = correct / total
+                print(f"Epoch {epoch+1}, 损失: {total_loss/len(train_dataloader):.4f}, 训练准确率: {epoch_acc:.4f}")
+            
+            # 保存分类器参数
+            torch.save(classifier.state_dict(), model_path)
+            print(f"模型参数已保存到 {model_path}")
+            
+        else:
+            print("使用预计算特征进行预测...")
+            
+            # 检查特征文件是否存在
+            if not os.path.exists(test_feature_path):
+                raise FileNotFoundError(f"测试特征文件不存在: {test_feature_path}")
+            
+            # 加载预计算的测试特征
+            print(f"加载预计算的测试特征: {test_feature_path}")
+            test_feature_data = torch.load(test_feature_path)
+            test_features = test_feature_data['features']
+            hidden_dim = test_feature_data['hidden_dim']
+            
+            # 创建分类器并加载训练好的参数
+            from llm_predict import MLP_classifier
+            classifier = MLP_classifier(hidden_dim, 2).to(device)
+            classifier.load_state_dict(torch.load(model_path, map_location=device))
+            classifier.eval()
+            
+            print("使用预计算特征开始预测...")
+            predictions = []
+            
+            test_dataloader = DataLoader(test_features, batch_size=args.batch_size, shuffle=False)
+            
+            with torch.no_grad():
+                for batch_features in tqdm(test_dataloader, desc="预测中"):
+                    batch_features = batch_features.to(device)
+                    logits = classifier(batch_features)
+                    batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
+                    predictions.extend(batch_predictions)
+            
+            # 保存预测结果
+            with open(f'llm_{MODEL}.txt', 'w') as f:
+                for pred in predictions:
+                    f.write(f"{pred}\n")
+            
+            print(f"预测结果已保存到 llm_{MODEL}.txt，共 {len(predictions)} 条预测")
     
+    # 模式3: 原始实时特征提取模式
+    else:
+        print("实时特征提取模式...")
+        
+        # 加载模型和分词器
+        print(f"加载模型: {MODEL_PATH}")
+        model, tokenizer = load_model_tok(device=device)
+        tokenizer.pad_token = tokenizer.eos_token
+        train_data,val_data = split_train_val_data(load_jsonl(args.train_file), val_ratio=0.0)
+        print(f"训练数据量: {len(train_data)}, 验证数据量: {len(val_data)}")
+        
+        # 创建LLM特征分类器
+        llm_classifier = LLMFeatureClassifier(model, tokenizer, device, output_dim=2)
+        llm_classifier.classifier.to(device)
+
+        if args.train:
+            print("开始训练模式...")
+            llm_classifier = train_classifier(llm_classifier, train_data, val_data, device, 
+                                            batch_size=args.batch_size, num_epochs=1, model_name=args.model)
+            torch.save(llm_classifier.classifier.state_dict(), model_path)
+            print(f"模型参数已保存到 {model_path}")
+
+        else:
+            print("开始测试模式...")
+            llm_classifier.classifier.load_state_dict(torch.load(model_path, map_location=device))
+            llm_classifier.eval()
+            test_data = load_jsonl(args.test_file)
+            print(f"加载测试数据: {len(test_data)} 条")
+            
+            # 开始记录测试特征
+            llm_classifier.start_recording()
+            
+            predictions = []
+            test_dataloader = DataLoader(test_data, batch_size=args.batch_size, collate_fn=lambda x: x)
+            
+            for batch in tqdm(test_dataloader, desc="预测中"):
+                batch_texts = []
+                for item in batch:
+                    batch_texts.append(item["text"])
+                
+                prompts = [f"Determine if the following text was written by a human (0) or generated by an AI language model (1).\n\nText: \"{text}\"" 
+                          for text in batch_texts]
+                
+                inputs = llm_classifier.tokenizer(prompts, return_tensors="pt", padding=True, truncation=True, max_length=512)
+                inputs = {k: v.to(device) for k, v in inputs.items()}
+                
+                with torch.no_grad():
+                    logits, _ = llm_classifier(inputs)
+                    print("分类器训练模式:", llm_classifier.classifier.training)
+                    print('feature',_[:5,0:3]) # 测试一下
+                    print('logits',logits[:10])
+                    print('bias',llm_classifier.classifier.fc1.bias[:5])
+
+                    print("logits",llm_classifier.classifier(_)[:10])
+                    logits = llm_classifier.classifier(_) # 手动计算
+                    batch_predictions = torch.argmax(logits, dim=-1).cpu().numpy()
+                exit()
+                predictions.extend(batch_predictions)
+            
+            # 停止记录并保存测试特征
+            llm_classifier.stop_recording()
+            llm_classifier.save_recorded_features(test_feature_path, args.model)
+            
+            with open(f'llm_{MODEL}.txt', 'w') as f:
+                for pred in predictions:
+                    f.write(f"{pred}\n")
+            
+            print(f"预测结果已保存到 llm_{MODEL}.txt，共 {len(predictions)} 条预测")
