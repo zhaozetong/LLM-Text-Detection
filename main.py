@@ -12,83 +12,8 @@ from torch.utils.data import DataLoader, TensorDataset
 from classifier import MLP_classifier, TransformerClassifier, ResNetClassifier, RandomForestWrapper
 from data_utils import set_seed, create_non_overlapping_subsets, load_precomputed_features
 
-def train_mlp(model, train_features, train_labels, val_features=None, val_labels=None, 
-              batch_size=64, learning_rate=1e-3, num_epochs=10, device='cpu'):
-    """训练MLP分类器"""
-    
-    train_dataset = TensorDataset(train_features, train_labels)
-    train_dataloader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    
-    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=1e-3)
-    criterion = nn.CrossEntropyLoss()
-    scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=1, gamma=0.5)
-    
-    model.to(device)
-    best_val_acc = 0.0
-    
-    for epoch in range(num_epochs):
-        # 训练阶段
-        model.train()
-        total_loss = 0.0
-        correct = 0
-        total = 0
-        
-        for batch_features, batch_labels in tqdm(train_dataloader, desc=f"Epoch {epoch+1}/{num_epochs}"):
-            batch_features = batch_features.to(device)
-            batch_labels = batch_labels.to(device)
-            
-            optimizer.zero_grad()
-            logits = model(batch_features)
-            loss = criterion(logits, batch_labels)
-            
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            
-            total_loss += loss.item()
-            predictions = torch.argmax(logits, dim=-1)
-            correct += (predictions == batch_labels).sum().item()
-            total += len(batch_labels)
-        
-        train_acc = correct / total
-        scheduler.step()
-        
-        # 验证阶段
-        if val_features is not None and val_labels is not None:
-            val_acc = evaluate_mlp(model, val_features, val_labels, batch_size, device)
-            print(f"Epoch {epoch+1}/{num_epochs}, 训练准确率: {train_acc:.4f}, 验证准确率: {val_acc:.4f}")
-            
-            if val_acc > best_val_acc:
-                best_val_acc = val_acc
-        else:
-            print(f"Epoch {epoch+1}/{num_epochs}, 训练准确率: {train_acc:.4f}")
-    
-    return model
 
-def evaluate_mlp(model, features, labels, batch_size=64, device='cpu'):
-    """评估MLP分类器"""
-    model.eval()
-    
-    dataset = TensorDataset(features, labels)
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
-    
-    correct = 0
-    total = 0
-    
-    with torch.no_grad():
-        for batch_features, batch_labels in dataloader:
-            batch_features = batch_features.to(device)
-            batch_labels = batch_labels.to(device)
-            
-            logits = model(batch_features)
-            predictions = torch.argmax(logits, dim=-1)
-            
-            correct += (predictions == batch_labels).sum().item()
-            total += len(batch_labels)
-    
-    return correct / total
-
-def predict_with_ensemble(models, model_types, test_features, batch_size=64, device='cpu', use_soft_voting=True):
+def predict_with_ensemble(models, model_types, test_features, batch_size=64, device='cpu', use_soft_voting=True,eval=True):
     """使用集成模型进行预测 - 支持多种模型类型"""
     all_predictions = []
     all_probabilities = []
@@ -98,7 +23,8 @@ def predict_with_ensemble(models, model_types, test_features, batch_size=64, dev
     
     for model_idx, (model, model_type) in enumerate(zip(models, model_types)):
         print(f"使用模型 {model_idx+1}/{len(models)} ({model_type}) 进行预测...")
-        model.eval()
+        if eval:
+            model.eval()
         if model_type != 'random_forest':
             model.to(device)
         
@@ -175,7 +101,7 @@ def create_model(model_type, input_dim, output_dim=2, **kwargs):
         raise ValueError(f"不支持的模型类型: {model_type}")
 
 def train_model(model, model_type, train_features, train_labels, val_features=None, val_labels=None, 
-              batch_size=64, learning_rate=1e-3, num_epochs=10, device='cpu'):
+              batch_size=64, learning_rate=1e-3, num_epochs=10, device='cpu',eval=True):
     """训练分类器 - 支持多种模型类型"""
     
     if model_type == 'random_forest':
@@ -234,10 +160,9 @@ def train_model(model, model_type, train_features, train_labels, val_features=No
             
             train_acc = correct / total
             scheduler.step()
-            
             # 验证阶段
             if val_features is not None and val_labels is not None:
-                val_acc = evaluate_model(model, model_type, val_features, val_labels, batch_size, device)
+                val_acc = evaluate_model(model, model_type, val_features, val_labels, batch_size, device,eval=eval)
                 print(f"Epoch {epoch+1}/{num_epochs}, 训练准确率: {train_acc:.4f}, 验证准确率: {val_acc:.4f}")
                 
                 if val_acc > best_val_acc:
@@ -247,7 +172,7 @@ def train_model(model, model_type, train_features, train_labels, val_features=No
         
         return model
 
-def evaluate_model(model, model_type, features, labels, batch_size=64, device='cpu'):
+def evaluate_model(model, model_type, features, labels, batch_size=64, device='cpu',eval=True):
     """评估分类器 - 支持多种模型类型"""
     
     if model_type == 'random_forest':
@@ -256,7 +181,8 @@ def evaluate_model(model, model_type, features, labels, batch_size=64, device='c
         return accuracy
     
     else:
-        model.eval()
+        if eval:
+            model.eval()
         
         dataset = TensorDataset(features, labels)
         dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
@@ -293,6 +219,7 @@ def main():
     parser.add_argument("--seed", type=int, default=42, help="随机种子")
     parser.add_argument("--soft_voting", action="store_true", help="使用软投票")
     parser.add_argument("--train", action="store_true", help="训练模式")
+    parser.add_argument("--eval", action="store_true", help="评估模式")
     
     args = parser.parse_args()
     set_seed(args.seed)
@@ -356,13 +283,11 @@ def main():
             else:
                 model = create_model(args.classifier, hidden_dim, output_dim=2)
             
-            # 数据增强 (仅对深度学习模型)
-            if args.classifier != 'random_forest':
-                augmented_features = add_feature_noise(subset_features, noise_factor=0.3)
-                augmented_labels = subset_labels.clone()
-            else:
-                augmented_features = subset_features
-                augmented_labels = subset_labels
+            # 数据增强 针对所有模型
+
+            augmented_features = add_feature_noise(subset_features, noise_factor=0.5)
+            augmented_labels = subset_labels.clone()
+
             
             model = train_model(
                 model, args.classifier, augmented_features, augmented_labels,
@@ -392,7 +317,8 @@ def main():
         final_predictions = predict_with_ensemble(
             trained_models, model_types, test_features, 
             batch_size=args.batch_size, device=device, 
-            use_soft_voting=args.soft_voting
+            use_soft_voting=args.soft_voting,
+            eval=args.eval
         )
         
         n0=0
@@ -447,7 +373,8 @@ def main():
             final_predictions = predict_with_ensemble(
                 loaded_models, model_types, test_features,
                 batch_size=args.batch_size, device=device,
-                use_soft_voting=args.soft_voting
+                use_soft_voting=args.soft_voting,
+                eval=args.eval
             )
             n0=0
             n1=0

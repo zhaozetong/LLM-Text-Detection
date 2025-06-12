@@ -32,12 +32,17 @@ def load_jsonl(file_path):
 
 class FeatureExtractor:
     """LLM特征提取器"""
-    def __init__(self, model, tokenizer, device, num_layers=3):
+    def __init__(self, model, tokenizer, device, layer_indices=None):
         self.model = model
         self.tokenizer = tokenizer
         self.device = device
-        self.num_layers = num_layers  # 使用最后几层
-        self.hidden_states_list = []  # 存储多层隐藏状态
+        
+        # 如果没有指定层索引，默认使用最后3层
+        if layer_indices is None:
+            layer_indices = [-3, -2, -1]
+        self.layer_indices = layer_indices
+        
+        self.hidden_states_list = []  # 存储指定层的隐藏状态
         self._register_hooks()
         
         # 获取隐藏层维度
@@ -51,39 +56,68 @@ class FeatureExtractor:
             self.hidden_dim = 4096
             print(f"无法直接获取隐藏层维度，使用默认值: {self.hidden_dim}")
     
+    def _get_total_layers(self):
+        """获取模型总层数"""
+        if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
+            return len(self.model.model.layers)
+        elif hasattr(self.model, 'model') and hasattr(self.model.model, 'blocks'):
+            return len(self.model.model.blocks)
+        elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
+            return len(self.model.transformer.h)
+        else:
+            raise ValueError("不支持的模型结构，无法获取层数")
+    
+    def _normalize_layer_indices(self, layer_indices, total_layers):
+        """将负数索引转换为正数索引，并验证索引有效性"""
+        normalized_indices = []
+        for idx in layer_indices:
+            if idx < 0:
+                normalized_idx = total_layers + idx
+            else:
+                normalized_idx = idx
+            
+            if normalized_idx < 0 or normalized_idx >= total_layers:
+                raise ValueError(f"层索引 {idx} 超出范围 [0, {total_layers-1}] 或 [{-total_layers}, -1]")
+            
+            normalized_indices.append(normalized_idx)
+        
+        return normalized_indices
+    
     def _register_hooks(self):
-        """注册前向钩子函数以捕获最后几层隐藏状态"""
-        def create_hook_fn(layer_idx):
+        """注册前向钩子函数以捕获指定层的隐藏状态"""
+        total_layers = self._get_total_layers()
+        normalized_indices = self._normalize_layer_indices(self.layer_indices, total_layers)
+        
+        # 初始化隐藏状态列表
+        self.hidden_states_list = [None] * len(normalized_indices)
+        
+        def create_hook_fn(storage_idx):
             def hook_fn(module, input, output):
                 if isinstance(output, tuple):
                     hidden_state = output[0]
                 else:
                     hidden_state = output
-                # 确保列表长度足够
-                while len(self.hidden_states_list) <= layer_idx:
-                    self.hidden_states_list.append(None)
-                self.hidden_states_list[layer_idx] = hidden_state
+                self.hidden_states_list[storage_idx] = hidden_state
             return hook_fn
         
         # 针对不同模型结构注册钩子
         if hasattr(self.model, 'model') and hasattr(self.model.model, 'layers'):
             layers = self.model.model.layers
-            for i in range(self.num_layers):
-                layer_idx = len(layers) - 1 - i  # 从最后一层开始
-                layers[layer_idx].register_forward_hook(create_hook_fn(i))
+            for storage_idx, layer_idx in enumerate(normalized_indices):
+                layers[layer_idx].register_forward_hook(create_hook_fn(storage_idx))
         elif hasattr(self.model, 'model') and hasattr(self.model.model, 'blocks'):
             blocks = self.model.model.blocks
-            for i in range(self.num_layers):
-                layer_idx = len(blocks) - 1 - i
-                blocks[layer_idx].register_forward_hook(create_hook_fn(i))
+            for storage_idx, layer_idx in enumerate(normalized_indices):
+                blocks[layer_idx].register_forward_hook(create_hook_fn(storage_idx))
         elif hasattr(self.model, 'transformer') and hasattr(self.model.transformer, 'h'):
             layers = self.model.transformer.h
-            for i in range(self.num_layers):
-                layer_idx = len(layers) - 1 - i
-                layers[layer_idx].register_forward_hook(create_hook_fn(i))
+            for storage_idx, layer_idx in enumerate(normalized_indices):
+                layers[layer_idx].register_forward_hook(create_hook_fn(storage_idx))
         else:
             raise ValueError("不支持的模型结构，无法注册钩子")
-    
+        
+        print(f"已注册钩子到层: {normalized_indices} (原始输入: {self.layer_indices})")
+
     def _get_pooled_output(self, attention_mask=None):
         """获取池化后的特征表示，对多层隐藏状态求平均"""
         # 收集所有有效的隐藏状态
@@ -130,7 +164,7 @@ class FeatureExtractor:
             
             with torch.no_grad():
                 # 清空之前的隐藏状态
-                self.hidden_states_list = [None] * self.num_layers
+                self.hidden_states_list = [None] * len(self.layer_indices)
                 _ = self.model(**inputs)
             
             # 使用修改后的特征提取方法
@@ -150,10 +184,10 @@ def main():
     parser.add_argument("--test_file", type=str, default="test.jsonl", help="测试数据文件")
     parser.add_argument("--batch_size", type=int, default=16, help="批处理大小")
     parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/checkpoint/features", help="特征保存目录")
-    parser.add_argument("--num_layers", type=int, default=3, help="使用最后几层隐藏状态求平均 (默认3层)")
-    
     args = parser.parse_args()
-    
+    layer_indices = [10,11]#中间层
+    # 解析层索引
+
     model_paths = {
         'llama-2-7b': "/root/.cache/huggingface/hub/Llama-2-7b-chat-hf",
         'llama-2-13b': "/root/autodl-tmp/Llama-2-13b-chat-hf",
@@ -169,7 +203,7 @@ def main():
     print(f"加载模型: {model_path}")
     model, tokenizer = load_model_tok(model_path, device)
     
-    extractor = FeatureExtractor(model, tokenizer, device, num_layers=args.num_layers)
+    extractor = FeatureExtractor(model, tokenizer, device, layer_indices=layer_indices)
     
     # 创建输出目录
     os.makedirs(args.output_dir, exist_ok=True)
@@ -206,7 +240,7 @@ def main():
     }, test_save_path)
     print(f"测试特征已保存到: {test_save_path}")
     
-    print(f"特征提取完成! 使用最后{args.num_layers}层平均. 训练特征形状: {train_features.shape}, 测试特征形状: {test_features.shape}")
+    print(f"特征提取完成! 使用层索引{layer_indices}. 训练特征形状: {train_features.shape}, 测试特征形状: {test_features.shape}")
 
 if __name__ == "__main__":
     main()

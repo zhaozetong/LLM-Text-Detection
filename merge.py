@@ -1,28 +1,21 @@
 import numpy as np
 from collections import Counter
 
-model_list = ['llama-2-7b','llama-2-13b','llama-3-8b','qwen-7b','llama-3-3b', \
-              'mistral-7b','no_seed']
+model_list = ['llama-2-7b','llama-2-13b','llama-3-8b','qwen-7b','llama-3-3b']
 res = []
 
 # 读取所有模型预测结果
 predictions = []
 for model in model_list:
-    for i in range(1, 6):
-        # 构建文件名
-        if model == 'no_seed':
-            file_name = "./5res/no_seed.txt"
-        else:
-            file_name = f"./5res/llm_{model}_subset_{i}.txt"
 
-        with open(file_name, 'r') as f:
-            model_preds = [int(line.strip()) for line in f.readlines()]
-            if len(model_preds) != 2800:
-                print(f"警告: {file_name} 包含 {len(model_preds)} 条预测，预期应为2800条")
-            predictions.append(model_preds)
-            print(f"已加载 {file_name} 的预测结果")
-        if model == 'no_seed':
-            break
+    file_name = f'{model}_mlp.txt'
+
+    with open(file_name, 'r') as f:
+        model_preds = [int(line.strip()) for line in f.readlines()]
+        if len(model_preds) != 2800:
+            print(f"警告: {file_name} 包含 {len(model_preds)} 条预测，预期应为2800条")
+        predictions.append(model_preds)
+        print(f"已加载 {file_name} 的预测结果")
 
 
 # 转换为numpy数组以方便处理
@@ -52,11 +45,11 @@ for i in range(predictions.shape[1]):
     #     close_vote_indices.append(i)
     #     print(f"索引 {i} 的投票比例为 {zeros_count}:{ones_count}")
     p = zeros_count / (ones_count + 0.1)  # 防止除以0
-    if 0.4<p<0.6: # 找出不太确定的标签
+    if 0.3<p<0.7: # 找出不太确定的标签
         close_vote_indices.append(i)
         
 # 将bagging结果保存到文件
-with open('35merge.txt', 'w') as f:
+with open('final.txt', 'w') as f:
     for result in bagging_results:
         f.write(f"{result}\n")
 
@@ -65,6 +58,6 @@ with open('uncertain_index.txt', 'w') as f:
     for idx in close_vote_indices:
         f.write(f"{idx}\n")
 
-print(f"Bagging完成，结果已保存到 merge.txt")
+print(f"Bagging完成，结果已保存到 final.txt")
 print(f"共 {len(bagging_results)} 条预测，其中标签0: {bagging_results.count(0)}个，标签1: {bagging_results.count(1)}个")
 print(f"发现 {len(close_vote_indices)} 个投票比例不中的样本，索引已保存到 uncertain_index.txt")
